@@ -1,0 +1,609 @@
+---
+title: "STATS 786 Group Project"
+author: "Shi Wennan"
+date: \today
+fontsize: 11pt
+output:
+  bookdown::html_document2:
+    fig_height: 5
+    toc: yes
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+    number_sections: false
+    code_folding: show
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fpp3)
+library(seasonal)
+library(tidyverse)
+library(kableExtra)
+```
+
+# 1. Introduction
+
+The Household Labour Force Survey (HLFS) is a quarterly survey conducted by Statistics New Zealand. It measures the numbers of employed and unemployed people, those not in the labour force, and the official unemployment rate for New Zealand.
+
+The `employed_full.csv` file contains information about the number of people employed (in thousands) by ANZSIC06 industry group in New Zealand. The full data set contains measurements from 2003 Q1 until 2023 Q1.
+
+We are group 4, allocated to the time series for the `Electricity, Gas, Water and Waste Services`. For ease of analysis, we rename it as `Utility` to indicate the number of people employed (in thousands) in the `Electricity, Gas, Water and Waste Services` industry. In this project, we perform time series analyses of the allocated data, including data features discussion, ETS and ARIMA candidate models exploration, model comparison, result analysis, etc. The data from 2003 Q1 until 2021 Q1 is used as the training set, and the remainder as the test set.
+
+# 2. Original Time Series
+
+## 2.1 Read and Plot
+
+In this section, we will read and extract the allocated data, observe and discuss the statistical features of the original time series.
+
+```{r message = FALSE}
+data <- read_csv("employed_full.csv") %>%
+  select(Quarter, `Electricity, Gas, Water and Waste Services`) %>%
+  rename(Utility = `Electricity, Gas, Water and Waste Services`) %>%
+  mutate(Quarter = yearquarter(Quarter)) %>%
+  as_tsibble(index = Quarter)
+```
+
+```{r}
+train <- data %>%
+  filter(Quarter <= yearquarter("2021 Q1"))
+```
+
+```{r fig-1, fig.cap = "The number of employed in the utility industry", fig.align = "center"}
+train %>%
+  autoplot(Utility) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)")
+```
+
+From Figure \@ref(fig:fig-1), we can observe that the original time series presents an upward trend, and have no obvious seasonality or cycle.
+
+## 2.2 Check the Seasonality
+
+Here, we will decompose the original time series using X-13ARIMA-SEATS to observe and confirm if the seasonality is present or not. Commonly used decomposition methods include Classical decomposition, STL decomposition, X-13-ARIMA-SEATS decomposition. We choose X-13-ARIMA-SEATS decomposition for the following reasons: 1. It is more robust to outliers; 2. Allowing the seasonal component to vary with time; 3. Trend-cycle estimates are available for all observations. X-13-ARIMA-SEATS is often used in official statistical practice.
+
+```{r}
+dcmp <- train %>%
+  model(X_13ARIMA_SEATS(Utility)) %>%
+  components()
+```
+
+```{r fig-2, fig.cap = "X-13ARIMA-SEATS decomposition", fig.align = "center"}
+dcmp %>%
+  autoplot()
+```
+
+```{r fig-3, fig.cap = "Quarterly subplot of the employed in the utility industry", fig.align = "center"}
+dcmp %>%
+  gg_subseries(Utility) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)")
+```
+
+From Figure \@ref(fig:fig-2), we can observe that the variation in the seasonal component is the smallest (the range from 0.98 to 1.02), which indicates the seasonality is insignificant. From Figure \@ref(fig:fig-3), although the mean of Q2 is slightly lower than the other three quarters, the difference is only around 1. Therefore, we consider the seasonal component in this time series to be negligible.
+
+## 2.3 Check the Remainder
+
+Here, we will check whether the remainder component is consistent with white noise.
+
+```{r fig-4, fig.cap = "The correlogram for the remainder series", fig.align = "center"}
+dcmp %>%
+  ACF(irregular) %>%
+  autoplot() +
+  theme_minimal()
+```
+
+```{r}
+dcmp %>%
+  features(irregular, features = ljung_box, lag = 10, dof = 0)
+```
+
+From Figure \@ref(fig:fig-4), we can observe that the significant spike only at lag 1. From the Ljung-Box test, we set lag = 10 for non-seasonal data, the p-value is greater than 0.05, so we can't reject the null hypothesis, indicating that the remainder series is consistent with white noise.
+
+# 3. Data Transformation
+
+## 3.1 Calculate lambda
+
+In this section, we will check if the time series needs to be transformed using Box-Cox transformation.
+
+```{r}
+(lambda <- train %>%
+   features(Utility, features = guerrero) %>%
+   pull(lambda_guerrero))
+```
+
+From the Box-Cox transformation, the value of parameter lambda is small which is close to 0, indicating that the time series needs to be transformed (approximate to do log transformation).
+
+```{r fig-5, fig.cap = "The number of employed in the utility industry (transformed)", fig.align = "center"}
+train %>%
+  autoplot(box_cox(Utility, lambda)) +
+  theme_minimal() +
+  labs(y = "Employed (transformed)")
+```
+
+From Figure \@ref(fig:fig-5), we can observe that compare with the original time series plot, the shape of the transformed time series does not change significantly, but the scale of the y-axis becomes much smaller after transformation.
+
+## 3.2 Check the Seasonality (Transformed)
+
+```{r}
+dcmp.trans <- train %>%
+  model(X_13ARIMA_SEATS(box_cox(Utility, lambda))) %>%
+  components()
+```
+
+```{r fig-6, fig.cap = "X-13ARIMA-SEATS decomposition (transformed)", fig.align = "center"}
+dcmp.trans %>%
+  autoplot()
+```
+
+```{r fig-7, fig.cap = "Quarterly subplot of the employed in the utility industry (transformed)", fig.align = "center"}
+dcmp.trans %>%
+  gg_subseries(`box_cox(Utility, lambda)`) +
+  theme_minimal() +
+  labs(y = "Employed in Utility (Transformed)")
+```
+
+From Figure \@ref(fig:fig-6), we can observe that after transformation, the variation in the seasonal component is the smallest (the range from -0.03 to 0.02). From Figure \@ref(fig:fig-7), the difference between the mean of Q2 and the other three quarters is less than 0.1. Therefore, we conclude that the seasonal component in this transformed time series is negligible.
+
+## 3.3 Check the Remainder (Transformed)
+
+```{r fig-8, fig.cap = "The correlogram for the remainder series (transformed)", fig.align = "center"}
+dcmp.trans %>%
+  ACF(irregular) %>%
+  autoplot() +
+  theme_minimal()
+```
+
+```{r}
+dcmp.trans %>%
+  features(irregular, features = ljung_box, lag = 10, dof = 0)
+```
+
+From Figure \@ref(fig:fig-8), we can observe that similar to the original time series, the significant spike only at lag 1. From the Ljung-Box test, the p-value is greater than 0.05, so we can’t reject the null hypothesis, indicating that the remainder series is consistent with white noise.
+
+From the above analysis, the Box-Cox parameter indicates the transformation is necessary. Data transformation will be applied in the following model fitting.
+
+Transformed data show the obvious trend, which is not stationary. We will do the differencing later in the ARIMA Model section.
+
+# 4. ETS Model
+
+## 4.1 Candidate Models
+
+In this section, we use transformed data to fit the ETS models.
+
+The seasonal component is negligible, and this time series shows an obvious trend, so we consider Holt's linear trend method as a candidate model (i.e., ETS(A, A, N)).
+
+Forecasts from Holt's linear trend method have a constant trend indefinitely into the future, which potentially trends to over-forecast, so we consider the damped trend method as a candidate model (i.e., ETS(A, Ad, N)).
+
+It is hard to tell if the error part of ETS is additive or multiplicative, so we consider both error("A") and error("M").
+
+Based on the above analysis, we have 4 manually chosen candidate models: ETS(A, A, N), ETS(M, A, N), ETS(A, Ad, N), ETS(M, Ad, N).
+
+In addition, we will also fit the ETS model automatically.
+
+```{r}
+fits.ETS <- train %>%
+  model(Auto = ETS(box_cox(Utility, lambda)),
+        Holt = ETS(box_cox(Utility, lambda) ~ error("A") + trend("A") + season("N")),
+        MAN = ETS(box_cox(Utility, lambda) ~ error("M") + trend("A") + season("N")),
+        Damped = ETS(box_cox(Utility, lambda) ~ error("A") + trend("Ad") + season("N")),
+        MAdN = ETS(box_cox(Utility, lambda) ~ error("M") + trend("Ad") + season("N")))
+```
+
+```{r fig-9, fig.cap = "Five ETS models for the number of employed in the utility industry", fig.align = "center"}
+train %>%
+  autoplot(Utility, alpha = 0.5) +
+  geom_line(data = augment(fits.ETS),
+            mapping = aes(y = .fitted,
+                          colour = .model)) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)",
+       colour = "ETS Model")
+```
+
+From Figure \@ref(fig:fig-9), we can observe that all five ETS models roughly captured the features from the original time series, but they tend to overlap most of the time. It is hard to compare which one is better than the others from the plot. We consider comparing shortlisted models using AICc.
+
+## 4.2 Compare Models with AICc
+
+```{r}
+fits.ETS %>% select(Auto) %>% report()
+fits.ETS %>% select(Holt) %>% report()
+fits.ETS %>% select(MAN) %>% report()
+fits.ETS %>% select(Damped) %>% report()
+fits.ETS %>% select(MAdN) %>% report()
+```
+
+The automatically selected model is ETS(A, N, N), where $\alpha$ is 0.83 which is close to 1, indicating that this model is similar to the naïve model.  A large $\alpha$ indicates that the adjustment taking place in the next forecast in the direction of the previous data point is large.
+
+When we closely examine the other models (i.e., Holt, MAN, Damped, and MAdN), we observe that they all have larger $\alpha$ and very small $\beta$. Smaller $\beta$ suggests slight changes in the slope.  Here the very small $\beta$ indicates that the slope change is negligible.
+
+```{r}
+glance(fits.ETS) %>%
+  select(.model, AICc)
+```
+
+From the above results, we can observe that the automatically selected model [ETS(A, N, N)] has the lowest AICc (-39.62363), meaning it strikes the best balance between model fit and model complexity out of the five competing models.
+
+The automatically selected model [ETS(A, N, N)] indicates that there is no clear trend in the data. Observing Figure \@ref(fig:fig-5) carefully reveals that the data before 2010 Q1 shows a roughly horizontal trend, and then shows an obvious upward trend. Therefore, strictly speaking, the entire time series is piecewise linear. So the automatically selected model (i.e., simple exponential smoothing model) as the preferred ETS model does make sense.
+
+The general equations of ETS(A, N, N) are:
+
+**Forecast equation:** $\hat y_{t+1|t} = l_t$
+
+**Smoothing/level equation:** $l_t = \alpha y_t+(1-\alpha)l_{t-1}$
+
+where $l_t$ is the level of the series at time $t$.
+
+The smoothing parameter $\alpha$ is 0.83. The equation of the preferred ETS model is:
+
+**Forecast equation:** $\hat y_{t+1|t} = l_t$
+
+**Smoothing/level equation:** $l_t = 0.83y_t+0.17l_{t-1}$
+
+where $l_t$ is the level of the series at time $t$.
+
+## 4.3 Check the Model Assumptions
+
+Here, we will check the model assumptions for the chosen model, which include linearity, independence, normality, and equality of variance. If the model does not satisfy the above assumptions, the forecast may be misleading.
+
+```{r fig-10, fig.cap = "Linearity of fitted values versus observed data", fig.align = "center"}
+fits.ETS %>%
+  select(Auto) %>%
+  augment() %>%
+  ggplot(aes(x = box_cox(.fitted, lambda), y = box_cox(Utility, lambda))) +
+  geom_point(alpha = 0.25) +
+  labs(x = "Fitted values",
+       y = "Observed data") +
+  geom_abline(intercept = 0, slope = 1) +
+  theme_minimal()
+```
+
+```{r fig-11, fig.cap = "Residual diagnostics", fig.align = "center"}
+fits.ETS %>%
+  select(Auto) %>%
+  gg_tsresiduals()
+```
+
+```{r fig-12, fig.cap = "Normal distribution diagnosis of innovation residuals", fig.align = "center"}
+innov.ETS <- (fits.ETS %>% select(Auto) %>% augment())$.innov
+qqnorm(innov.ETS)
+qqline(innov.ETS)
+```
+
+```{r}
+fits.ETS %>%
+  select(Auto) %>%
+  augment() %>%
+  features(.innov, features = ljung_box, lag = 10, dof = 2)
+```
+
+From Figure \@ref(fig:fig-10), we can observe that when comparing the fitted values versus observed data on the transformed scale, it is mostly linear. From Figure \@ref(fig:fig-11), the variance of the innovation residuals appears constant. The ACF plot and Ljung-Box test show there is no significant autocorrelation, indicating the independence assumption is satisfied. Noting that dof = 2 here because we have two parameters in the Auto model. From Figure \@ref(fig:fig-12), the innovation residuals roughly normal distributed. Therefore, the model assumptions are satisfied.
+
+## 4.4 Forecast
+
+Here we will produce forecasts for the h = 8 quarters using the Auto model [ETS(A, N, N)], including point forecasts and prediction intervals.
+
+```{r}
+fc.ETS <- fits.ETS %>%
+  select(Auto) %>%
+  forecast(h = 8)
+```
+
+```{r fig-13, fig.cap = "Forecasts for the h = 8 quarters using the Auto model", fig.align = "center"}
+fc.ETS %>%
+  autoplot(train) +
+  geom_line(data = augment(fits.ETS %>% select(Auto)),
+            mapping = aes(y = .fitted,
+                          colour = .model)) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)",
+       colour = "model")
+```
+
+```{r}
+fc.ETS %>%
+  hilo(level = 95)
+```
+
+From Figure \@ref(fig:fig-13), we can observe that the Auto model [ETS(A, N, N)] roughly captures the features from the original time series, and its forecasts show a slight upward trend. The prediction interval gets wider as the forecast time increases.
+
+Taking 2021 Q2 as an example, with 95% confidence, we predict that people employed in the utility industry in New Zealand will be somewhere between 23.37455 and 31.57782 (in thousands).
+
+# 5. ARIMA Model
+
+## 5.1 Differencing
+
+This time series has piecewise linear trend, so it is not stationary, we will do the differencing to stabilise the mean of a time series. But firstly, we will do KPSS test to check if the data (transformed) are stationary and non-seasonal.
+
+```{r}
+train %>%
+  features(box_cox(Utility, lambda), unitroot_kpss)
+```
+
+The p-value is less than 0.05, so we reject the null hypothesis, indicating that the data (transformed) are not stationary or non-seasonal. Then we will use `unitroot_nsdiffs` to check if we need to apply any seasonal difference, and will use `unitroot_ndiffs` to find the number of differences.
+
+```{r}
+train %>%
+  features(box_cox(Utility, lambda), unitroot_nsdiffs)
+```
+
+```{r}
+train %>%
+  features(box_cox(Utility, lambda), unitroot_ndiffs)
+```
+
+These functions suggest we should apply 0 seasonal difference and 1 first-order difference.
+
+```{r}
+train %>%
+  features(difference(box_cox(Utility, lambda)), unitroot_kpss)
+```
+
+After applying 1 first-order difference, the p-value is greater than 0.05, so we can't reject the null hypothesis, indicating that the data are stationary and non-seasonal after being transformed and differenced.
+
+```{r fig-14, fig.cap = "The data after being transformed and differenced", fig.align = "center", warning = FALSE}
+train %>%
+  autoplot(difference(box_cox(Utility, lambda))) +
+  theme_minimal() +
+  labs(y = "Employed (transformed and differenced)")
+```
+
+From Figure \@ref(fig:fig-14), we can observe that the data are weakly stationary and non-seasonal after being transformed and differenced, which can be used to fit ARIMA models.
+
+## 5.2 Candidate Models
+
+In this section, we will fit the non-seasonal ARIMA model, that is estimate p, d, q, and c. We have already applied 1 first-order difference, which means the order of differencing is $d = 1$. The next step is to assess the ACF and PACF plots to determine appropriate candidate AR or MA orders.
+
+In addition, we will also consider fitting the ARIMA model automatically.
+
+```{r fig-15, fig.cap = "ACF and PACF plots", fig.align = "center", warning = FALSE}
+train %>%
+  gg_tsdisplay(difference(box_cox(Utility, lambda)), plot_type = "partial") +
+  labs(y = "difference")
+```
+
+From Figure \@ref(fig:fig-15), we can observe that none of the lags are significant and there are no other strong patterns in the ACF and PACF plots, so our candidate model is ARIMA(0, 1, 0) (i.e., the random walk model).
+
+The stepwise model uses a stepwise search to traverse the model space, rather than considering every possible combination of p, q and c. When `stepwise = FALSE` (i.e., search model), a much larger set of models will be searched.
+
+```{r}
+fits.ARIMA <- train %>%
+  model(arima010 = ARIMA(box_cox(Utility, lambda) ~ pdq(0,1,0)),
+        stepwise = ARIMA(box_cox(Utility, lambda)),
+        search = ARIMA(box_cox(Utility, lambda), stepwise = FALSE))
+```
+
+```{r fig-16, fig.cap = "Three ARIMA models for the number of employed in the utility industry", fig.align = "center"}
+train %>%
+  autoplot(Utility, alpha = 0.5) +
+  geom_line(data = augment(fits.ARIMA),
+            mapping = aes(y = .fitted,
+                          colour = .model)) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)",
+       colour = "ARIMA Model")
+```
+
+From Figure \@ref(fig:fig-16), we can observe that the three ARIMA models roughly capture the features from the original time series. It seems that the red (arima010) does not obvious in the plot, indicating that this model overlaps with either stepwise model or search model. It is hard to compare which one is better from the plot. We consider comparing shortlisted models using AICc.
+
+## 5.3 Compare Models with AICc
+
+```{r}
+fits.ARIMA %>% select(arima010) %>% report()
+fits.ARIMA %>% select(stepwise) %>% report()
+fits.ARIMA %>% select(search) %>% report()
+```
+
+```{r}
+glance(fits.ARIMA) %>%
+  select(.model, AICc)
+```
+
+From the above results, we can observe that the stepwise model gives the same result as the manually fitted model [ARIMA(0,1,0)]. The search model [ARIMA(0,1,3) w/ drift] has the lowest AICc (-148.4151), meaning it strikes the best balance between model fit and model complexity out of the three competing models.
+
+**However, during the progress of the project, we found that the search model gives error warnings when doing cross-validation. So finally we consider pick the manually fitted model [ARIMA(0,1,0)] as the preferred ARIMA model.**
+
+The reasons are as follows: 1. The search model gives error warnings, indicating that it is not numerically stable, the ARIMA(0,1,0) model doesn't have such issue when doing cross-validation; 2. The AICc of the ARIMA(0,1,0) model (-145.4268) is not much different from the AICc of the search model (-148.4151), indicating that the two models perform similarly; 3. The ARIMA(0,1,0) model is simpler.
+
+The general equations of ARIMA(p, d, q) model is:
+$$(1-\phi_1B-...-\phi_pB^p)(1-B)^dy_t = c+(1+\theta_1B+...+\theta_qB^q)\varepsilon_t$$
+
+The preferred ARIMA model is ARIMA(0,1,0), there is no parameter estimated in this model. Therefore, the equation of the preferred ARIMA model is:
+$$(1-B)y_t = \varepsilon_t$$
+
+## 5.4 Check the Model Assumptions
+
+Then, we will check the model assumptions for the chosen model, which include linearity, independence, normality, and equality of variance. If the model does not satisfy the above assumptions, the forecast may be misleading.
+
+```{r fig-17, fig.cap = "Linearity of fitted values versus observed data", fig.align = "center"}
+fits.ARIMA %>%
+  select(arima010) %>%
+  augment() %>%
+  ggplot(aes(x = box_cox(.fitted, lambda), y = box_cox(Utility, lambda))) +
+  geom_point(alpha = 0.25) +
+  labs(x = "Fitted values",
+       y = "Observed data") +
+  geom_abline(intercept = 0, slope = 1) +
+  theme_minimal()
+```
+
+```{r fig-18, fig.cap = "Residual diagnostics", fig.align = "center"}
+fits.ARIMA %>%
+  select(arima010) %>%
+  gg_tsresiduals()
+```
+
+```{r fig-19, fig.cap = "Normal distribution diagnosis of innovation residuals", fig.align = "center"}
+innov.ARIMA <- (fits.ARIMA %>% select(arima010) %>% augment())$.innov
+qqnorm(innov.ARIMA)
+qqline(innov.ARIMA)
+```
+
+```{r}
+fits.ARIMA %>%
+  select(arima010) %>%
+  augment() %>%
+  features(.innov, features = ljung_box, lag = 10, dof = 0)
+```
+
+From Figure \@ref(fig:fig-17), we can observe that when comparing the fitted values versus observed data on the transformed scale, it is mostly linear. From Figure \@ref(fig:fig-18), the variance of the innovation residuals appears constant. The ACF plot and Ljung-Box test show there is no significant autocorrelation, indicating the independence assumption is satisfied. Noting that dof = 0 here because we have no parameters in the ARIMA(0,1,0) model. From Figure \@ref(fig:fig-19), the innovation residuals roughly appear normal distribution. Therefore, the model assumptions are satisfied.
+
+## 5.5 Forecast
+
+Here we will produce forecasts for the h = 8 quarters using the ARIMA(0,1,0) model, including point forecasts and prediction intervals.
+
+```{r}
+fc.ARIMA <- fits.ARIMA %>%
+  select(arima010) %>%
+  forecast(h = 8)
+```
+
+```{r fig-20, fig.cap = "Forecasts for the h = 8 quarters using the arima010 model", fig.align = "center"}
+fc.ARIMA %>%
+  autoplot(train) +
+  geom_line(data = augment(fits.ARIMA %>% select(arima010)),
+            mapping = aes(y = .fitted,
+                          colour = .model)) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)",
+       colour = "model")
+```
+
+```{r}
+fc.ARIMA %>%
+  hilo(level = 95)
+```
+
+From Figure \@ref(fig:fig-20), we can observe that the ARIMA(0,1,0) model roughly captures the features from the original time series, and its forecasts show a slight upward trend. The prediction interval gets wider as the forecast time increases.
+
+Taking 2021 Q2 as an example, with 95% confidence, we predict that people employed in the utility industry in New Zealand will be somewhere between 23.29482 and 31.50043 (in thousands).
+
+# 6. Test
+
+In this section, we will use cross-validation and test set to compare forecasts to evaluate model accuracy. AICc cannot compare models in different classes (such as ETS and ARIMA in this project), because the likelihood is computed differently. Cross-validation averages forecast error over many test sets,  which can reflect the model accuracy better. There are three main rolling types that can be used: Stretch, Slide, Tile. We choose Slide to create the rolling training sets, and refer to Mean Absolute Scaled Error (MASE) as a measure of accuracy because it is scale invariant.
+
+## 6.1 Compare Models with cross-validation
+
+Here we use 1-step cross-validation to assess forecast error for ETS vs ARIMA. We set `.size = 4` because the models will error warning if it is smaller than 4.
+
+```{r warning = FALSE}
+train %>%
+  slide_tsibble(.size = 4, .step = 1) %>%
+  model(ets = ETS(box_cox(Utility, lambda) ~ error("A") + trend("N") + season("N")),
+        arima = ARIMA(box_cox(Utility, lambda) ~ pdq(0,1,0))) %>%
+  forecast(h = 1) %>%
+  accuracy(train)
+```
+
+From the above result, we can observe that the MASE of the ETS model (0.7154385) is higher than the MASE of the ARIMA model (0.5906648), so the ARIMA model performs better. Then we will use test set to compare these two models again.
+
+## 6.2 Test on ETS Model
+
+```{r fig-21, fig.cap = "ETS(A, N, N) forecasts with the test set for the 8 quarters", fig.align = "center"}
+fc.ETS %>%
+  autoplot(data) +
+  geom_line(data = augment(fits.ETS %>% select(Auto)),
+            mapping = aes(y = .fitted,
+                          colour = .model)) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)",
+       colour = "model")
+```
+
+```{r}
+accuracy(fc.ETS, data)
+```
+
+## 6.3 Test on ARIMA Model
+
+```{r fig-22, fig.cap = "ARIMA(0,1,0) forecasts with the test set for the 8 quarters", fig.align = "center"}
+fc.ARIMA %>%
+  autoplot(data) +
+  geom_line(data = augment(fits.ARIMA %>% select(arima010)),
+            mapping = aes(y = .fitted,
+                          colour = .model)) +
+  theme_minimal() +
+  labs(y = "Employed (in thousands)",
+       colour = "model")
+```
+
+```{r}
+accuracy(fc.ARIMA, data)
+```
+
+From Figure \@ref(fig:fig-21) and Figure \@ref(fig:fig-22), we can observe that the test set shows a downward and then a sharp upward trend. Because of the impact of COVID-19 in 2020 Q1, the economy was hit hard, the number of people employed also decreased. After the lockdown was over, the economy ushered in a retaliatory rebound, so the number of people employed also increased sharply.
+
+All 8 quarters in the test set fall within the prediction interval at the 80% level. The forecasts of both models show a slight upward trend, but it is hard to tell which model is better from the plot. The MASE of the ETS model (1.285226) is higher than the MASE of the ARIMA model (1.259338), so the ARIMA model performs better. The test results are consistent with the cross-validation results.
+
+# 7. Benefits and Limitations of ETS vs ARIMA
+
+## 7.1 ETS
+
+ETS model is also known as the Error, Trend, and Seasonality model, it is based on a description of the trend and seasonality in the data, where the error component represents the random fluctuations or noise in the data that cannot be explained by the trend or seasonality.
+
+**Benefits:**
+
+- ETS models are flexible in terms of modeling time series components. They can capture various types of trends, seasonality and errors.
+
+- ETS models are straightforward which is easy to understand and interpret. The components in ETS models allow for a better understanding of the underlying patterns and dynamics in the data.
+
+- ETS models are easy to implement.
+
+**Limitations:**
+
+- ETS models have limited ability to handle complex patterns, such as sudden changes and irregular variation.
+
+**ETS in our allocated time series:**
+
+When creating a shortlist of appropriate candidate ETS models, we observe the time series to identify the type of trend and seasonality. No further work (i.e., differencing) is required.
+
+The preferred ETS model is the simple exponential smoothing model ETS(A, N, N), which is suitable for the data with no clear trend or seasonality. However, considering that the allocated time series has a long-term increasing trend, this model might not be entirely suitable.
+
+COVID-19 was unexpected and had a huge impact on employment numbers in the industry. ETS models are not very good at handling sudden changes. Therefore, its forecast doesn't capture the sharp drop in 2021 Q2.
+
+## 7.2 ARIMA
+
+The ARIMA model, short for Autoregressive Integrated Moving Average, is a versatile model that can capture both the autoregressive (AR) and moving average (MA) properties of the time series, as well as handling non-stationary data via differencing (Integrated). ARIMA models aim to describe the autocorrelations in the data.
+
+**Benefits:**
+
+- ARIMA models can account for a range of time series patterns.
+
+- ARIMA models are helpful when there is autocorrelation in the data.
+
+**Limitations:**
+
+- ARIMA models are less interpretable regarding the time series patterns (such as trend and seasonality) present in the data.
+
+- ARIMA models have difficulty in handling sudden and abrupt changes in the time series.
+
+**ARIMA in our allocated time series:**
+
+When creating a shortlist of appropriate candidate ARIMA models, we first need to observe the time series to identify if the data is stationary. Then, we perform the KPSS test to determine differencing order. Afterward, we conduct ACF and PACF plots to determine the order of AR and MA. More work is required compared with ETS models.
+
+The preferred ARIMA model is the Random walk model ARIMA(0, 1, 0). It is widely used for non-stationary data, particularly financial and economic data.
+
+ARIMA models are also not very good at handling sudden changes (i.e., COVID-19). Therefore, its forecast doesn't capture the sharp drop in 2021 Q2.
+
+## 7.3 ETS vs ARIMA
+
+Both ETS models and ARIMA models are popular approaches in time series forecasting. While linear ETS models are all special cases of ARIMA models, the non-linear ETS models have no equivalent ARIMA counterparts. On the other hand, ARIMA models have no equivalent ETS counterparts. The selection of the model depends on the data features. In our data, where only an obvious trend is present, there is not much difference in the performance of ARIMA(0, 1, 0) and ETS(A, N, N). Overall, ARIMA(0, 1, 0) outperforms ETS(A, N, N) slightly. It is also worth noting that the lowest AICc ARIMA model is ARIMA(0, 1, 3). However, there are error warnings during the cross-validation stage when modeling with ARIMA(0, 1, 3), indicating that this model is not numerically stable for our allocated dataset. We have to choose the second smallest AICc ARIMA model, ARIMA(0, 1, 0). 
+
+# 8. Conclusion
+
+In this project, our group is allocated the data for the number of people employed in the `Electricity, Gas, Water and Waste Services` industry. After reading the data into R, we visualize the original time series to observe its statistical features, such as trend-cycle, seasonality, variability, etc. Then we use X-13-ARIMA-SEATS to decompose the original time series and examine the seasonality and remainder. We discover that the original data shows an upward trend with no apparent seasonality or cycle. Subsequently, we perform the Box_Cox transformation check and find out that a transformation is required. After transforming the data, we visualize it again and employ X-13-ARIMA-SEATS for decomposition. Our conclusion remains the same: the data displays an upward trend and the seasonality is negligible.
+
+We create a shortlist of appropriate ETS models and ARIMA models based on the transformed data. The candidate models are selected both manually and automatically. We employ AICc to identify the preferred model within each class. By this approach, we determine ETS(A, N, N) as the preferred ETS model, ARIMA(0, 1, 0) as the preferred ARIMA model although the lowest AICc model in the class is [ARIMA(0, 1, 3) w/ drift], it is deselected due to it gives error warnings when doing cross-validation.
+
+We use cross-validation and test set to compare forecasts to evaluate model accuracy. We use Mean Absolute Scaled Error (MASE) as the evaluation metric. ARIMA(0, 1, 0) slightly outperforms ETS(A, N, N) in both comparisons.
+
+ETS and ARIMA are widely used in time series modeling. ETS models are based on a description of the trend and seasonality in the data, while ARIMA models aim to describe the autocorrelations in the data. However, neither model is proficient at dealing with unforeseen factors. Although the preferred ETS model and ARIMA model perform reasonably well until 2021 Q1, neither successfully capture the unexpected impact of COVID-19. In this project, the ARIMA model slightly outperforms than ETS model.
+
+We have gained a meaningful experience with both ETS and ARIMA models, demonstrating their underlying theory and practical application for time series forecasting. It is important to note that ETS and ARIMA models have their own advantages and limitations, and the choice of model should be based on the specific data at hand. Through this project, we understand the importance of proper model selection and validation for generating accurate forecasts, equipping us with valuable skills for future data analysis projects.
+
+# 9. Contribution
+
+In this project, Che Pam and Chen Yuqi are mainly responsible for introduction, original time series, data transformation, and ETS model. Shi Wennan and Zhang Haolin are mainly responsible for ARIMA model, test, benefits and limitations of ETS vs ARIMA, and conclusion. In addition, all group members reviewed the code and report together, and made comments and suggestions. Everyone contributed equally.
+
+Thanks to Matt Edwards for his guidance and help during the project.
