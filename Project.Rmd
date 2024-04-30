@@ -1,5 +1,5 @@
 ---
-title: "STATS 786 Group Project"
+title: "STATS 786 Project"
 author: "Shi Wennan"
 date: \today
 fontsize: 11pt
